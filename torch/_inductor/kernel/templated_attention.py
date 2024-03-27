@@ -51,13 +51,14 @@ sdpa_template = TritonTemplate(
     # TODO these need to be plumbed correctly
     IS_CAUSAL = False
     qk_scale = 1.0
+    MATMUL_PRECISION = tl.float16
 
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
 
-    qvk_offset = off_hz * stride_qh
+    qkv_offset = off_hz * stride_qh
     Q_block_ptr = tl.make_block_ptr(
-        base=Q + qvk_offset,
+        base=Q + qkv_offset,
         shape=(N_CTX, BLOCK_DMODEL),
         strides=(stride_qm, stride_qk),
         offsets=(start_m * BLOCK_M, 0),
@@ -65,7 +66,7 @@ sdpa_template = TritonTemplate(
         order=(1, 0)
     )
     K_block_ptr = tl.make_block_ptr(
-        base=K + qvk_offset,
+        base=K + qkv_offset,
         shape=(BLOCK_DMODEL, N_CTX),
         strides=(stride_kk, stride_kn),
         offsets=(0, 0),
@@ -73,7 +74,7 @@ sdpa_template = TritonTemplate(
         order=(0, 1)
     )
     V_block_ptr = tl.make_block_ptr(
-        base=V + qvk_offset,
+        base=V + qkv_offset,
         shape=(N_CTX, BLOCK_DMODEL),
         strides=(stride_vk, stride_vn),
         offsets=(0, 0),
@@ -93,7 +94,7 @@ sdpa_template = TritonTemplate(
     # TODO fix me
     # qk_scale = sm_scale * 1.44269504
     q = tl.load(Q_block_ptr)
-    q = (q * qk_scale).to(tl.float16)
+    q = (q * qk_scale).to(MATMUL_PRECISION)
     # loop over k, v and update accumulator
     lo = 0
     hi = (start_m + 1) * BLOCK_M if IS_CAUSAL else N_CTX
@@ -104,7 +105,7 @@ sdpa_template = TritonTemplate(
         v = tl.load(V_block_ptr)
         # -- compute qk ---
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, k)
+        qk += tl.dot(q, k.to(MATMUL_PRECISION))
         # ~~~~~~~~~~~~~~~~~~~ Apply score modification  ~~~~~~~~~~~~~~~~~~~
         {{ modification(
             score="qk",
@@ -134,7 +135,7 @@ sdpa_template = TritonTemplate(
         # -- scale and update acc --
         acc_scale = l_i * 0 + alpha  # workaround some compiler bug
         acc *= acc_scale[:, None]
-        acc += tl.dot(p.to(tl.float16), v)
+        acc += tl.dot(p.to(MATMUL_PRECISION), v.to(MATMUL_PRECISION))
 
         # -- update m_i and l_i --
         l_i = l_i * alpha + tl.sum(p, 1)
@@ -150,7 +151,7 @@ sdpa_template = TritonTemplate(
     # tl.store(l_ptrs, m_i + tl.math.log2(l_i))
     # write back O
     # O_block_ptr = tl.make_block_ptr(
-    #     base=Out + qvk_offset,
+    #     base=Out + qkv_offset,
     #     shape=(N_CTX, BLOCK_DMODEL),
     #     strides=(stride_om, stride_on),
     #     offsets=(start_m * BLOCK_M, 0),
@@ -164,6 +165,6 @@ sdpa_template = TritonTemplate(
     idx_m = offs_m[:, None]
     idx_d = tl.arange(0, BLOCK_DMODEL)[None, :]
     mask = (idx_m != -1) & (idx_d != -1)
-    {{store_output(("idx_z", "idx_h", "idx_m", "idx_d"), "acc", "mask")}}
+    {{store_output(("idx_z", "idx_h", "idx_m", "idx_d"), "acc")}}
  """,
 )

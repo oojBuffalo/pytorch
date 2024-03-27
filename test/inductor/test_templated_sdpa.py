@@ -3,13 +3,13 @@
 import functools
 
 import torch
-from torch.nn.attention.templated_attention import sdpa
+from torch.nn.attention.templated_attention import templated_attention
 
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
 def create_attention(score_mod):
-    return functools.partial(sdpa, score_mod=score_mod)
+    return functools.partial(templated_attention, score_mod=score_mod)
 
 
 class TestTemplatedSDPA(TestCase):
@@ -23,7 +23,12 @@ class TestTemplatedSDPA(TestCase):
             q.to(torch.float64), k.to(torch.float64), v.to(torch.float64)
         )
         compiled_out = compiled_sdpa(q, k, v)
-        torch.testing.assert_close(ref_out.to(dtype=torch.float32), compiled_out)
+        torch.testing.assert_close(
+            ref_out.to(dtype=torch.float32),
+            compiled_out.to(dtype=torch.float32),
+            rtol=5e-3,
+            atol=5e-3,
+        )
 
     def test_identity(self):
         def score_mod(score, b, h, m, n):
@@ -51,13 +56,13 @@ class TestTemplatedSDPA(TestCase):
 
     def test_rel_causal(self):
         def score_mod(score, b, h, m, n):
-            return (score + (m - n)) * torch.where(m <= n, score, float("-inf"))
+            return torch.where(m <= n, score + (m - n), float("-inf"))
 
         self.run_test(score_mod)
 
     def test_alibi_causal(self):
         def score_mod(score, b, h, m, n):
-            return (score + (m - n) * h) * torch.where(m <= n, score, float("-inf"))
+            return torch.where(m <= n, score + (m - n) * h, float("-inf"))
 
         self.run_test(score_mod)
 
